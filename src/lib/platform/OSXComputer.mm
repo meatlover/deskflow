@@ -699,10 +699,25 @@ void OSXComputer::enable()
   if (m_isPrimary) {
     // FIXME -- start watching jump zones
 
+    // WindowServer waits for an active tap's reply on every event, which lags the
+    // cursor by up to 1-2 s under fast motion. So while the cursor is on this
+    // computer a listen-only tap reads input, and the active tap, which swallows
+    // input, is enabled only while the cursor is on a client (see updateActiveTap()).
+    // A listen-only tap gets key events only with Input Monitoring access.
+    if (CGPreflightListenEventAccess()) {
+      m_listenTapPort = CGEventTapCreate(
+          kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly, kCGEventMaskForAllEvents,
+          handleCGInputEventLocal, this
+      );
+    }
+    if (!m_listenTapPort) {
+      LOG_WARN("no listen-only event tap, the cursor may lag: grant Deskflow Input Monitoring access");
+    }
+
     // kCGEventTapOptionDefault = 0x00000000 (Missing in 10.4, so specified literally)
     m_eventTapPort = CGEventTapCreate(
-        kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, kCGEventMaskForAllEvents, handleCGInputEvent,
-        this
+        kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, kCGEventMaskForAllEvents,
+        handleCGInputEventRemote, this
     );
   } else {
     // FIXME -- prevent system from entering power save mode
@@ -731,13 +746,23 @@ void OSXComputer::enable()
       m_eventTapThread = std::thread([this, sem]() {
         m_eventTapRunLoop = CFRunLoopGetCurrent();
         CFRunLoopAddSource(m_eventTapRunLoop, m_eventTapRLSR, kCFRunLoopDefaultMode);
+        CFRunLoopSourceRef listenRLSR =
+            m_listenTapPort ? CFMachPortCreateRunLoopSource(kCFAllocatorDefault, m_listenTapPort, 0) : nullptr;
+        if (listenRLSR) {
+          CFRunLoopAddSource(m_eventTapRunLoop, listenRLSR, kCFRunLoopDefaultMode);
+        }
         dispatch_semaphore_signal(sem);
         CFRunLoopRun();
+        if (listenRLSR) {
+          CFRunLoopRemoveSource(CFRunLoopGetCurrent(), listenRLSR, kCFRunLoopDefaultMode);
+          CFRelease(listenRLSR);
+        }
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), m_eventTapRLSR, kCFRunLoopDefaultMode);
         m_eventTapRunLoop = nullptr;
       });
       dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
       dispatch_release(sem);
+      updateActiveTap();
     } else {
       LOG_ERR("failed to create a CFRunLoopSourceRef for the quartz event tap");
     }
@@ -770,6 +795,13 @@ void OSXComputer::disable()
     CFRelease(m_eventTapPort);
     m_eventTapPort = nullptr;
   }
+
+  if (m_listenTapPort) {
+    CGEventTapEnable(m_listenTapPort, false);
+    CFMachPortInvalidate(m_listenTapPort);
+    CFRelease(m_listenTapPort);
+    m_listenTapPort = nullptr;
+  }
   // FIXME -- allow system to enter power saving mode
 
   if (m_clipboardTimer != nullptr) {
@@ -790,6 +822,7 @@ void OSXComputer::disable()
 void OSXComputer::enter()
 {
   m_isOnComputer = true;
+  updateActiveTap();
   showCursor();
 
   if (m_isPrimary) {
@@ -831,6 +864,23 @@ void OSXComputer::leave()
 
   // now off computer
   m_isOnComputer = false;
+  updateActiveTap();
+}
+
+void OSXComputer::updateActiveTap()
+{
+  // without a listen-only tap the active tap reads all input, so it stays on
+  if (!m_listenTapPort || !m_eventTapRunLoop) {
+    return;
+  }
+
+  // toggle on the tap thread, after any callback in flight, so this cannot interleave
+  // with the timeout re-enable in handleCGInputEvent(). the flag is read when the
+  // block runs, so the last block applies the latest state.
+  CFRunLoopPerformBlock(m_eventTapRunLoop, kCFRunLoopDefaultMode, ^{
+    CGEventTapEnable(m_eventTapPort, !m_isOnComputer);
+  });
+  CFRunLoopWakeUp(m_eventTapRunLoop);
 }
 
 bool OSXComputer::setClipboard(ClipboardID, const IClipboard *src)
@@ -1671,6 +1721,31 @@ OSXComputer::handleCGInputEventSecondary(CGEventTapProxy proxy, CGEventType type
     }
   }
   return event;
+}
+
+// Listen-only tap: reads input while the cursor is on this computer.
+CGEventRef OSXComputer::handleCGInputEventLocal(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
+{
+  OSXComputer *computer = (OSXComputer *)refcon;
+  if (type == kCGEventTapDisabledByTimeout) {
+    CGEventTapEnable(computer->m_listenTapPort, true);
+  } else if (computer->m_isOnComputer) {
+    handleCGInputEvent(proxy, type, event, refcon);
+  }
+  return event;
+}
+
+// Active tap: swallows input while the cursor is on a client. With a listen-only
+// tap it is disabled while on this computer, so an event that arrives then was in
+// flight at enter(), and the listen-only tap has it.
+CGEventRef
+OSXComputer::handleCGInputEventRemote(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
+{
+  OSXComputer *computer = (OSXComputer *)refcon;
+  if (computer->m_isOnComputer && computer->m_listenTapPort) {
+    return event;
+  }
+  return handleCGInputEvent(proxy, type, event, refcon);
 }
 
 // Quartz event tap support

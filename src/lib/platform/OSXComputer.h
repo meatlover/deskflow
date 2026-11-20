@@ -167,8 +167,11 @@ private:
 
   // Quartz event tap support
   static CGEventRef handleCGInputEvent(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
+  static CGEventRef handleCGInputEventLocal(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
+  static CGEventRef handleCGInputEventRemote(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
   static CGEventRef
   handleCGInputEventSecondary(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
+  void updateActiveTap();
 
   // convert CFString to char*
   static char *CFStringRefToUTF8String(CFStringRef aString);
@@ -302,6 +305,7 @@ private:
   // Quartz input event support
   CFMachPortRef m_eventTapPort;
   CFRunLoopSourceRef m_eventTapRLSR;
+  CFMachPortRef m_listenTapPort = nullptr;
   std::thread m_eventTapThread;
   CFRunLoopRef m_eventTapRunLoop = nullptr;
 
