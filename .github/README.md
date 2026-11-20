@@ -1,3 +1,33 @@
+> [!IMPORTANT]
+> **This is an unofficial fork of [deskflow/deskflow](https://github.com/deskflow/deskflow).** It is not affiliated with the Deskflow project.
+> It is upstream `master` ([`80221f0f7`](https://github.com/deskflow/deskflow/commit/80221f0f7b7ebd807fb1ffdf00906bbcfe561011)) plus a single fix:
+> [**fix(mac): use a listen-only event tap while the cursor is on the server**](https://github.com/meatlover/deskflow/commit/ca982b4c114f497c0f172b8051c4089e93559a1c).
+>
+> **Problem.** On a macOS server, the cursor trails the hand by 1–2 s during fast motion, and often moves in jumps. Deskflow
+> watches input through an *active* Quartz event tap (`kCGEventTapOptionDefault` at `kCGHIDEventTap`), and WindowServer waits for
+> the tap to hand every event back. When WindowServer is busy, those waits add up faster than events arrive, so a backlog builds.
+> Under that load WindowServer also merges queued moves, which is why the cursor jumps.
+>
+> **Evidence** (macOS 27.0.1, M3 Ultra, 125 Hz mouse):
+> - A standalone active tap with the same settings, whose callback returns each event immediately, reproduces the lag.
+>   WindowServer even disables it by timeout.
+> - The same tap as listen-only does not lag.
+> - A spindump of `deskflow-core` during the lag shows its tap thread blocked on WindowServer while handing events back
+>   (`_CGSEventTapSendDataProcessedAck`), with no samples in Deskflow's own callback.
+>
+> **Fix.** While the cursor is on the server, Deskflow only reads input and never changes or drops it, so the active tap is not
+> needed there. Input is read through a listen-only tap. The active tap, which swallows local input, is enabled only while the
+> cursor is on a client. It is switched in `enter()`/`leave()` on the tap thread.
+>
+> **Notes**
+> - Grant Deskflow **both** *Accessibility* and *Input Monitoring*. Without Input Monitoring, the server falls back to the old
+>   single active tap and logs `no listen-only event tap, the cursor may lag`.
+> - Only the macOS **server** role changes. The client role and the other platforms are identical to upstream.
+> - There are no binaries; build from source. With Homebrew Qt 6.9 on the macOS 27 SDK, add
+>   `-DWrapOpenGL_AGL="$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework"` to the CMake configure step.
+>   A locally built app needs its own bundle ID if the official Deskflow is also installed, because macOS keys privacy grants
+>   by bundle ID.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://github.com/deskflow/deskflow-artwork/blob/main/logo/deskflow-logo-dark-200px.png?raw=true">
   <source media="(prefers-color-scheme: light)" srcset="https://github.com/deskflow/deskflow-artwork/blob/main/logo/deskflow-logo-light-200px.png?raw=true">
